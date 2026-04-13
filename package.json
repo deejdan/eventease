@@ -1,0 +1,36 @@
+{
+  "name": "eventease",
+  "version": "1.0.0",
+  "description": "A multi-tenant event management platform built to streamline the full lifecycle of any event — from planning and guest management, through invitations and RSVPs, to event day check-in and post-event follow-up.",
+  "type": "module",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "dev": "node --env-file=.env --import tsx/esm src/server.ts",
+    "build": "tsc",
+    "start": "node --env-file=.env dist/src/server.js",
+    "db:migrate": "node --env-file=.env ./node_modules/.bin/prisma migrate dev",
+    "db:generate": "node --env-file=.env ./node_modules/.bin/prisma generate"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "prisma": {
+    "schema": "infra/prisma/schema.prisma"
+  },
+  "dependencies": {
+    "@fastify/jwt": "^10.0.0",
+    "@libsql/client": "^0.17.2",
+    "@prisma/adapter-libsql": "^7.7.0",
+    "@prisma/client": "^7.7.0",
+    "fastify": "^5.8.4"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "prisma": "^7.7.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}
