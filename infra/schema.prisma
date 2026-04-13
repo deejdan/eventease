@@ -1,0 +1,352 @@
+// EventEase — Prisma Schema
+// Architecture: Hexagonal Modular Monolith
+// DB: SQLite (dev) → PostgreSQL (prod)
+
+// CONVENTION: Singular table names (@@map) — avoids plural irregularities (e.g. mouse → mice)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum EventStatus {
+  PLANNING
+  ONGOING
+  COMPLETED
+  CANCELLED
+}
+
+
+// ---------------------------------------------------------------------------
+// Tenant
+// ---------------------------------------------------------------------------
+
+model Tenant {
+  id          String   @id @default(cuid())
+  name        String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  archivedAt  DateTime?
+
+  memberships TenantMembership[]
+  events      Event[]
+  venues      Venue[]
+
+  @@map("tenant")
+}
+
+// A User can belong to many Tenants.
+// isOwner: exactly one per Tenant, enforced in app code (permission manager).
+//
+// Bitwise permission flags for tenant-scoped access.
+// Never reorder or reuse a bit value — doing so corrupts existing records.
+//
+//   TENANT_VIEW_EVENTS     = 1   (0b000001) — see event list
+//   TENANT_CREATE_EVENT    = 2   (0b000010) — create new events
+//   TENANT_ARCHIVE_EVENT   = 4   (0b000100) — archive/restore events
+//   TENANT_MANAGE_MEMBERS  = 8   (0b001000) — invite, remove, update member permissions
+//   TENANT_MANAGE_SETTINGS = 16  (0b010000) — edit tenant name and settings
+//
+// Preset compositions (defined in app code, not here):
+//   STAFF      = 1   (VIEW_EVENTS only)
+//   ORGANIZER  = 3   (VIEW + CREATE_EVENT)
+//   ADMIN      = 15  (VIEW + CREATE + ARCHIVE + MANAGE_MEMBERS)
+//   OWNER      = 31  (all) + isOwner = true
+model TenantMembership {
+  id          String   @id @default(cuid())
+  tenantId    String
+  userId      String
+  permissions Int      // bitwise — see flags above
+  isOwner     Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  user   User   @relation(fields: [userId], references: [id])
+
+  @@unique([tenantId, userId])
+  @@map("tenant_membership")
+}
+
+// ---------------------------------------------------------------------------
+// User
+// ---------------------------------------------------------------------------
+
+// Users authenticate via magic link (v1). Guests never have User records.
+// Credential strategy is decoupled — see MagicLinkToken.
+model User {
+  id         String    @id @default(cuid())
+  email      String    @unique
+  name       String
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  archivedAt DateTime?
+
+  memberships      TenantMembership[]
+  eventMemberships EventMembership[]
+  magicLinkTokens  MagicLinkToken[]
+
+  @@map("user")
+}
+
+// ---------------------------------------------------------------------------
+// Event
+// ---------------------------------------------------------------------------
+
+model Event {
+  id        String      @id @default(cuid())
+  tenantId  String
+  name      String
+  status    EventStatus @default(PLANNING)
+  startDate DateTime
+  endDate   DateTime?
+  venueId    String?
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+  archivedAt DateTime?
+
+  tenant      Tenant            @relation(fields: [tenantId], references: [id])
+  venue       Venue?            @relation(fields: [venueId], references: [id])
+  memberships EventMembership[]
+  eventGuests EventGuest[]
+  invitations Invitation[]
+
+  @@map("event")
+}
+
+// Tenant-scoped, reusable across events. Shown as a dropdown when creating/editing an event.
+model Venue {
+  id              String    @id @default(cuid())
+  tenantId        String
+  name            String
+  capacity        Int?
+  street          String?
+  city            String?
+  stateOrProvince String?
+  country         String?
+  zip             String?
+  latitude        Float?
+  longitude       Float?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  archivedAt      DateTime?
+
+  tenant Tenant  @relation(fields: [tenantId], references: [id])
+  events Event[]
+
+  @@unique([tenantId, name])
+  @@map("venue")
+}
+
+// Bitwise permission flags for event-scoped access.
+// Combine with bitwise OR to compose roles (e.g. STAFF = VIEW | CHECK_IN = 9).
+// Never reorder or reuse a bit value — doing so corrupts existing records.
+//
+//   VIEW           = 1   (0b000001)
+//   MANAGE_GUESTS  = 2   (0b000010)
+//   MANAGE_INVITES = 4   (0b000100)
+//   CHECK_IN       = 8   (0b001000)
+//   EXPORT         = 16  (0b010000)
+//   MANAGE_EVENT   = 32  (0b100000)
+//
+// Preset compositions (defined in app code, not here):
+//   VIEWER     = 1   (VIEW only)
+//   STAFF      = 9   (VIEW | CHECK_IN)
+//   ORGANIZER  = 7   (VIEW | MANAGE_GUESTS | MANAGE_INVITES)
+//   MANAGER    = 31  (all except MANAGE_EVENT)
+//   FULL       = 63  (all)
+model EventMembership {
+  id          String   @id @default(cuid())
+  eventId     String
+  userId      String
+  tenantId    String
+  permissions Int      // bitwise — see flags above
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  event  Event  @relation(fields: [eventId], references: [id])
+  user   User   @relation(fields: [userId], references: [id])
+
+  @@unique([eventId, userId])
+  @@map("event_membership")
+}
+
+// ---------------------------------------------------------------------------
+// Guest
+// ---------------------------------------------------------------------------
+
+// Pure identity model. Tenant-scoped — not event-scoped.
+// A guest is a person in the tenant's address book, reusable across events.
+// Add to an event via EventGuest. Invite via Invitation.
+// No hard uniqueness constraint on email — email is optional.
+model Guest {
+  id         String    @id @default(cuid())
+  tenantId   String
+  name       String
+  email      String?
+  phone      String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  archivedAt DateTime?
+
+  dietaryNeed    DietaryNeed?
+  eventGuests    EventGuest[]
+
+  // PlusOne records where this guest is the plus-one
+  asPlusOne      PlusOne?  @relation("PlusOneGuest")
+  // PlusOne records where this guest is the host
+  plusOnesHosted PlusOne[] @relation("PlusOneHost")
+
+  @@map("guest")
+}
+
+// Roster entry — links a Guest to an Event.
+// Must exist before an Invitation can be created.
+// Separates "on the list" from "has been invited".
+model EventGuest {
+  id        String   @id @default(cuid())
+  eventId   String
+  guestId   String
+  createdAt DateTime @default(now())
+
+  event      Event       @relation(fields: [eventId], references: [id])
+  guest      Guest       @relation(fields: [guestId], references: [id])
+  invitation Invitation?
+
+  @@unique([eventId, guestId])
+  @@map("event_guest")
+}
+
+// Separate model — keeps Guest pure.
+// Source of truth for dietary preference.
+// Also snapshotted on Invitation at RSVP time.
+model DietaryNeed {
+  id        String   @id @default(cuid())
+  guestId   String   @unique
+  need      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  guest Guest @relation(fields: [guestId], references: [id])
+
+  @@map("dietary_need")
+}
+
+// Captures the relationship between a plus-one and their host.
+// Guest is unaware of this concept — PlusOne owns the relationship.
+model PlusOne {
+  id          String   @id @default(cuid())
+  guestId     String   @unique  // the plus-one guest
+  invitedById String            // the host guest
+  createdAt   DateTime @default(now())
+
+  guest     Guest @relation("PlusOneGuest", fields: [guestId], references: [id])
+  invitedBy Guest @relation("PlusOneHost", fields: [invitedById], references: [id])
+
+  @@map("plus_one")
+}
+
+// ---------------------------------------------------------------------------
+// Invitation
+// ---------------------------------------------------------------------------
+
+// Delivery record for a roster entry. Requires an EventGuest to exist first.
+// Owns the token, delivery timestamps, and links to RSVP and check-in.
+// State is derived: sentAt/openedAt/bouncedAt for delivery, RsvpResponse and CheckIn for guest actions.
+// Token strategy: single opaque token, versioned internally.
+// tokenVersion is never exposed in the URL or QR code — audit use only.
+// On reissue, a new token is generated and tokenVersion increments.
+model Invitation {
+  id           String    @id @default(cuid())
+  tenantId     String
+  eventGuestId String    @unique
+  token        String    @unique
+  tokenVersion Int       @default(1)
+  sentAt       DateTime?
+  openedAt     DateTime?
+  bouncedAt    DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  eventGuest EventGuest        @relation(fields: [eventGuestId], references: [id])
+  rsvp       RsvpResponse?
+  checkIn    CheckIn?
+  events     InvitationEvent[]
+
+  @@map("invitation")
+}
+
+// Created when a guest responds to their invitation.
+// Presence of this record means the guest has responded.
+// dietaryNeedSnapshot is what the organizer acts on — stable after submission.
+model RsvpResponse {
+  id                  String    @id @default(cuid())
+  invitationId        String    @unique
+  accepted            Boolean
+  noteToOrganizer     String?
+  noteToHost          String?
+  dietaryNeedSnapshot String?
+  respondedAt         DateTime  @default(now())
+
+  invitation Invitation @relation(fields: [invitationId], references: [id])
+
+  @@map("rsvp_response")
+}
+
+// Created when a guest is checked in on event day.
+// actorId is the userId who performed the check-in (scanner, staff member).
+model CheckIn {
+  id           String   @id @default(cuid())
+  invitationId String   @unique
+  actorId      String
+  checkedInAt  DateTime @default(now())
+
+  invitation Invitation @relation(fields: [invitationId], references: [id])
+
+  @@map("check_in")
+}
+
+// Append-only delivery audit log. Never updated. Never deleted.
+// Answers "was this sent?" and "did it bounce?" for organizers.
+// type: SENT | OPENED | BOUNCED
+// actorId: userId for manual actions (e.g. resend), null for system-triggered events.
+// metadata: optional JSON for extra context (e.g. bounce reason from email provider).
+model InvitationEvent {
+  id           String   @id @default(cuid())
+  invitationId String
+  type         String
+  actorId      String?
+  metadata     String?
+  createdAt    DateTime @default(now())
+
+  invitation Invitation @relation(fields: [invitationId], references: [id])
+
+  @@map("invitation_event")
+}
+
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+
+// One-time token issued when a user requests a magic link.
+// Append-only — never updated. A new record is created on each request.
+// usedAt is set on first use; subsequent use attempts must be rejected in app code.
+model MagicLinkToken {
+  token     String    @id
+  userId    String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("magic_link_token")
+}
