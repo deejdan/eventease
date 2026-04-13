@@ -10,7 +10,6 @@ generator client {
 
 datasource db {
   provider = "sqlite"
-  url      = env("DATABASE_URL")
 }
 
 // ---------------------------------------------------------------------------
@@ -117,7 +116,6 @@ model Event {
   venue       Venue?            @relation(fields: [venueId], references: [id])
   memberships EventMembership[]
   eventGuests EventGuest[]
-  invitations Invitation[]
 
   @@map("event")
 }
